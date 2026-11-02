@@ -167,14 +167,10 @@ module connectorNamespace './connectorNamespace.bicep' = {
   }
 }
 
-// App settings live in a separate sub-resource so they can reference
-// outputs from the connectorNamespace module without creating a cycle
-// with the function app's identity principalId.
 var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${storage.name};EndpointSuffix=${environment().suffixes.storage};AccountKey=${storage.listKeys().keys[0].value}'
 
 var baseAppSettings = {
   APPLICATIONINSIGHTS_CONNECTION_STRING: appInsights.properties.ConnectionString
-  Office365Connection: connectorNamespace.outputs.office365ConnectionRuntimeUrl
 }
 
 var identityStorageSettings = {

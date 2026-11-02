@@ -1,13 +1,21 @@
 # Sample smoke tests
 
-Run `npm install` followed by `npm test` from any sample app directory. Each app's test command builds its TypeScript source and runs the shared suite against that app's own dependencies. After installing and building all six apps, run `node --test tests/samples.test.mjs` from the repository root to test them together.
+Run `npm install` followed by `npm test` from any sample app directory. Each app's test command builds its TypeScript source and runs the shared suite against that app's own dependencies. Office 365 and SharePoint also run the ownership suite. After installing and building all six apps, run the following from the repository root:
+
+```sh
+node --test tests/samples.test.mjs tests/operation-ownership.test.mjs
+```
 
 The suite checks:
 
 - The installed `@azure/connectors` version matches the exact version requested by the app, plus CommonJS and ESM SDK entry-point loading.
 - All 19 expected sample functions register through the actual connector extension.
+- Office 365 and SharePoint wrappers forward explicit Poll delivery, connection, and Trigger Config settings through the real connector-specific wrappers.
 - Eight payload scenarios per handler: object and JSON batches, object and JSON single items, empty batches, missing bodies, null payloads, and malformed JSON.
 - Items reach each handler, original payloads are preserved, and malformed JSON produces a warning.
+- Every Office 365 and SharePoint operation has the exact source/descriptor ownership mapping expected by project templates.
+- Materializing each operation removes all sibling source/config artifacts while preserving shared deployment, authentication, infrastructure, and project files byte-for-byte.
+- Shared deployment scripts contain no sibling operation catalog, require exactly one retained descriptor, create an enabled Poll Trigger Config through ARM `2026-05-01-preview`, and configure the derived Function settings.
 
 Only Azure Functions host registration is intercepted. The connector extension's normalization and typed-context wrappers run unchanged. These offline tests do not load local settings, need credentials, start a Functions host, call connector services, or provision resources. They do not replace end-to-end validation with authorized connections and live events.
 

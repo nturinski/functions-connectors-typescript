@@ -3,8 +3,12 @@
 
 import { InvocationContext } from '@azure/functions';
 import { connectors, EmailTriggerContext } from '@azure/functions-extensions-connectors';
+import type { PollConnectorTriggerOptions } from '../pollConnectorTriggerOptions.js';
 
-connectors.office365.onNewMentionMeEmail('OnNewMentionMeEmail', {
+const onNewMentionMeEmailOptions = {
+    deliveryMode: 'Poll',
+    connection: 'ConnectorNamespace',
+    triggerConfigName: '%ConnectorTriggerConfigName%',
     handler: async (context: EmailTriggerContext, invocationContext: InvocationContext) => {
         invocationContext.log('OnNewMentionMeEmail trigger received.');
 
@@ -15,4 +19,6 @@ connectors.office365.onNewMentionMeEmail('OnNewMentionMeEmail', {
 
         return context.rawPayload;
     },
-});
+} satisfies Parameters<typeof connectors.office365.onNewMentionMeEmail>[1] & PollConnectorTriggerOptions;
+
+connectors.office365.onNewMentionMeEmail('OnNewMentionMeEmail', onNewMentionMeEmailOptions);

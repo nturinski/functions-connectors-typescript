@@ -3,8 +3,12 @@
 
 import { InvocationContext } from '@azure/functions';
 import { connectors, EmailTriggerContext } from '@azure/functions-extensions-connectors';
+import type { PollConnectorTriggerOptions } from '../pollConnectorTriggerOptions.js';
 
-connectors.office365.onNewEmail('OnNewEmail', {
+const onNewEmailOptions = {
+    deliveryMode: 'Poll',
+    connection: 'ConnectorNamespace',
+    triggerConfigName: '%ConnectorTriggerConfigName%',
     handler: async (context: EmailTriggerContext, invocationContext: InvocationContext) => {
         invocationContext.log('OnNewEmail trigger received.');
 
@@ -24,4 +28,6 @@ connectors.office365.onNewEmail('OnNewEmail', {
         // rawPayload preserves the original payload for persistence or forwarding
         return context.rawPayload;
     },
-});
+} satisfies Parameters<typeof connectors.office365.onNewEmail>[1] & PollConnectorTriggerOptions;
+
+connectors.office365.onNewEmail('OnNewEmail', onNewEmailOptions);

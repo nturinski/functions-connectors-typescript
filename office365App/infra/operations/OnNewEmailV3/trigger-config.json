@@ -1,0 +1,12 @@
+{
+  "functionName": "OnNewEmail",
+  "triggerConfigName": "OnNewEmailV3",
+  "operationName": "OnNewEmailV3",
+  "description": "Poll for new Office 365 emails.",
+  "parameters": [
+    {
+      "name": "folderPath",
+      "value": "Inbox"
+    }
+  ]
+}

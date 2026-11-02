@@ -3,9 +3,8 @@
 
 // ----------------------------------------------------------------------------
 // Connector Namespace + a single Office 365 Outlook connection. Access
-// policies grant the function-app managed identity (and, optionally, the
-// deployer user) permission to call the connection at runtime so the
-// connector trigger callback and SDK calls are authorized.
+// policies grant the namespace polling runtime, function-app managed identity,
+// and optionally the deployer user permission to call the connection.
 // ----------------------------------------------------------------------------
 
 @minLength(1)
@@ -52,6 +51,20 @@ resource office365ConnectionMsiAccessPolicy 'Microsoft.Web/connectorGateways/con
       type: 'ActiveDirectory'
       identity: {
         objectId: functionAppPrincipalId
+        tenantId: tenantId
+      }
+    }
+  }
+}
+
+resource office365ConnectionNamespaceAccessPolicy 'Microsoft.Web/connectorGateways/connections/accessPolicies@2026-05-01-preview' = {
+  parent: office365Connection
+  name: 'namespace-trigger-runtime'
+  properties: {
+    principal: {
+      type: 'ActiveDirectory'
+      identity: {
+        objectId: connectorNamespace.identity.principalId
         tenantId: tenantId
       }
     }

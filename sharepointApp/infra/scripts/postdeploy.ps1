@@ -1,37 +1,104 @@
 # Post-deployment configuration for the sharepointApp.
 #
-# Uses the official `connector-namespace` Azure CLI extension from
-# https://github.com/Azure/Connectors. Two responsibilities:
-#   1. Create one Connector Namespace trigger config per Functions trigger
-#      in this app, each POSTing to the function's connector webhook URL.
-#   2. Walk the operator through OAuth consent for the SharePoint Online
-#      connection by opening the consent link in a browser and polling
-#      until the connection flips to `Connected`.
-#
-# Connection access policies for the function-app MI and the deployer
-# user are created by Bicep (infra/connectorNamespace.bicep).
+# The project template retains one operation descriptor under infra/operations.
+# This script resolves the selected SharePoint site/library parameters,
+# authorizes the shared connection, creates one Poll Trigger Config, and
+# configures the Function App.
+
+$ErrorActionPreference = 'Stop'
 
 Write-Host "Post-deployment configuration..." -ForegroundColor Yellow
 
+# --- Resolve the retained operation -----------------------------------------
+$operationsRoot = Join-Path (Split-Path $PSScriptRoot -Parent) 'operations'
+$descriptorFiles = if (Test-Path $operationsRoot) {
+    @(Get-ChildItem -Path $operationsRoot -Filter 'trigger-config.json' -File -Recurse)
+} else {
+    @()
+}
+
+if ($descriptorFiles.Count -ne 1) {
+    Write-Host "ERROR: expected exactly one retained operation descriptor under '$operationsRoot', found $($descriptorFiles.Count)." -ForegroundColor Red
+    exit 1
+}
+
+$descriptor = Get-Content -Path $descriptorFiles[0].FullName -Raw | ConvertFrom-Json
+foreach ($propertyName in @('functionName', 'triggerConfigName', 'operationName', 'description')) {
+    $property = $descriptor.PSObject.Properties[$propertyName]
+    if (-not $property -or [string]::IsNullOrWhiteSpace([string]$property.Value)) {
+        Write-Host "ERROR: operation descriptor is missing '$propertyName'." -ForegroundColor Red
+        exit 1
+    }
+}
+if (-not $descriptor.PSObject.Properties['parameters']) {
+    Write-Host "ERROR: operation descriptor must contain a parameters array." -ForegroundColor Red
+    exit 1
+}
+
+function Resolve-OperationParameters {
+    param(
+        [Parameter(Mandatory)] [object[]] $Definitions,
+        [Parameter(Mandatory)] [hashtable] $EnvironmentValues
+    )
+
+    $resolved = [System.Collections.Generic.List[object]]::new()
+    foreach ($definition in $Definitions) {
+        if ([string]::IsNullOrWhiteSpace([string]$definition.name)) {
+            throw "Operation descriptor contains a parameter without a name."
+        }
+
+        $valueProperty = $definition.PSObject.Properties['value']
+        if ($valueProperty) {
+            $resolved.Add(@{ name = $definition.name; value = $valueProperty.Value })
+            continue
+        }
+
+        $sourceName = [string]$definition.valueFromEnvironment
+        if ([string]::IsNullOrWhiteSpace($sourceName)) {
+            throw "Parameter '$($definition.name)' must define value or valueFromEnvironment."
+        }
+
+        $value = $EnvironmentValues[$sourceName]
+        if ([string]::IsNullOrWhiteSpace([string]$value)) {
+            if ($definition.required) {
+                throw "Required operation parameter '$($definition.name)' has no value in '$sourceName'."
+            }
+            continue
+        }
+
+        $resolved.Add(@{ name = $definition.name; value = $value })
+    }
+
+    return $resolved.ToArray()
+}
+
 # --- Read azd outputs --------------------------------------------------------
-$outputs = azd env get-values --output json | ConvertFrom-Json
+$outputsJson = azd env get-values --output json
+$outputs = ($outputsJson -join [Environment]::NewLine) | ConvertFrom-Json
 
-$resourceGroupName             = $outputs.resourceGroupName
-$connectorNamespaceName        = $outputs.connectorNamespaceName
-$sharepointConnectionName      = $outputs.sharepointConnectionName
-$functionAppName               = $outputs.functionAppName
+$resourceGroupName = $outputs.resourceGroupName
+$connectorNamespaceName = $outputs.connectorNamespaceName
+$sharepointConnectionName = $outputs.sharepointConnectionName
+$functionAppName = $outputs.functionAppName
+$subscriptionId = $outputs.AZURE_SUBSCRIPTION_ID
+if (-not $subscriptionId) {
+    $subscriptionId = az account show --query id -o tsv
+}
 
-if (-not $resourceGroupName -or -not $connectorNamespaceName -or -not $sharepointConnectionName -or -not $functionAppName) {
+if (-not $resourceGroupName -or -not $connectorNamespaceName -or -not $sharepointConnectionName -or -not $functionAppName -or -not $subscriptionId) {
     Write-Host "ERROR: required azd outputs missing. Run 'azd provision' first." -ForegroundColor Red
     exit 1
 }
 
-# --- Required SharePoint identifiers ----------------------------------------
-# Both SharePoint triggers used in this app are scoped to a specific site and
-# folder. These cannot be inferred at provisioning time, so we either read
-# them from azd env vars or prompt the user.
-$sharepointSiteAddress = $outputs.SHAREPOINT_SITE_ADDRESS
-$sharepointFolderId    = $outputs.SHAREPOINT_FOLDER_ID
+$apiVersion = '2026-05-01-preview'
+$namespaceResourceId = "/subscriptions/$subscriptionId/resourceGroups/$resourceGroupName/providers/Microsoft.Web/connectorGateways/$connectorNamespaceName"
+$triggerConfigResourceId = "$namespaceResourceId/triggerConfigs/$($descriptor.triggerConfigName)"
+
+# --- Resolve canonical SharePoint parameters -------------------------------
+$sharepointSiteAddress = [string]$outputs.SHAREPOINT_SITE_ADDRESS
+$sharepointTable = [string]$outputs.SHAREPOINT_TABLE
+$sharepointFolderPath = [string]$outputs.SHAREPOINT_FOLDER_PATH
+$sharepointTableWasConfigured = -not [string]::IsNullOrWhiteSpace($sharepointTable)
 
 function Select-FromList {
     param(
@@ -40,432 +107,455 @@ function Select-FromList {
         [Parameter(Mandatory)] [string] $LabelProperty,
         [string] $SubLabelProperty
     )
+
     Write-Host ""
     Write-Host $Title -ForegroundColor Cyan
-    for ($i = 0; $i -lt $Items.Count; $i++) {
-        $label = $Items[$i].$LabelProperty
-        if ($SubLabelProperty -and $Items[$i].$SubLabelProperty) {
-            Write-Host ("  [{0}] {1}  ({2})" -f ($i + 1), $label, $Items[$i].$SubLabelProperty)
+    for ($index = 0; $index -lt $Items.Count; $index++) {
+        $item = $Items[$index]
+        $label = $item.$LabelProperty
+        $subLabel = if ($SubLabelProperty) { $item.$SubLabelProperty } else { $null }
+        if ($subLabel) {
+            Write-Host ("  [{0}] {1}  ({2})" -f ($index + 1), $label, $subLabel)
         } else {
-            Write-Host ("  [{0}] {1}" -f ($i + 1), $label)
+            Write-Host ("  [{0}] {1}" -f ($index + 1), $label)
         }
     }
+
     while ($true) {
         $answer = Read-Host "Enter number (1-$($Items.Count))"
-        if ($null -eq $answer) {
-            throw "No input available. Re-run with 'interactive: true' on the hook, or set SHAREPOINT_SITE_ADDRESS / SHAREPOINT_FOLDER_ID via 'azd env set'."
-        }
-        $num = 0
-        if ([int]::TryParse($answer, [ref]$num) -and $num -ge 1 -and $num -le $Items.Count) {
-            return $Items[$num - 1]
+        $selection = 0
+        if ([int]::TryParse($answer, [ref]$selection) -and $selection -ge 1 -and $selection -le $Items.Count) {
+            return $Items[$selection - 1]
         }
         Write-Host "Invalid selection." -ForegroundColor Yellow
     }
 }
 
-$script:LastGraphError = $null
-
 function Invoke-Graph {
     param(
-        [Parameter(Mandatory)][string] $Url,
+        [Parameter(Mandatory)] [string] $Url,
         [string[]] $UriParameters,
         [switch] $Quiet
     )
-    $script:LastGraphError = $null
-    $errFile = [System.IO.Path]::GetTempFileName()
+
+    $arguments = @(
+        'rest',
+        '--method', 'get',
+        '--url', $Url,
+        '--resource', 'https://graph.microsoft.com',
+        '--output', 'json',
+        '--only-show-errors'
+    )
+    if ($UriParameters) {
+        $arguments += '--uri-parameters'
+        $arguments += $UriParameters
+    }
+
+    $raw = & az @arguments 2>&1
+    if ($LASTEXITCODE -ne 0 -or -not $raw) {
+        if (-not $Quiet -and $raw) {
+            Write-Host "   Microsoft Graph request failed." -ForegroundColor DarkGray
+        }
+        return $null
+    }
+
     try {
-        # PowerShell -> az.cmd -> cmd.exe re-parses args; cmd treats '&' as a
-        # command separator, which mangles URLs with query strings. Pass query
-        # params via --uri-parameters so az builds them server-side.
-        $azArgs = @('rest', '--method', 'get', '--url', $Url, '--resource', 'https://graph.microsoft.com')
-        if ($UriParameters -and $UriParameters.Count -gt 0) {
-            $azArgs += '--uri-parameters'
-            $azArgs += $UriParameters
+        return (($raw -join [Environment]::NewLine) | ConvertFrom-Json)
+    } catch {
+        if (-not $Quiet) {
+            Write-Host "   Microsoft Graph returned an unexpected response." -ForegroundColor DarkGray
         }
-        $raw = & az @azArgs 2>$errFile
-        if ($LASTEXITCODE -ne 0 -or -not $raw) {
-            $err = (Get-Content $errFile -Raw).Trim()
-            $script:LastGraphError = $err
-            if (-not $Quiet) {
-                if ($err) { Write-Host "   Graph call failed: $err" -ForegroundColor DarkGray }
-            }
-            return $null
-        }
-        return ($raw | ConvertFrom-Json)
-    } finally {
-        Remove-Item $errFile -ErrorAction SilentlyContinue
+        return $null
     }
 }
 
-function Test-IsGraphForbidden {
-    param([string] $ErrorText)
-    if (-not $ErrorText) { return $false }
-    return ($ErrorText -match '(?i)forbidden|accessDenied|InvalidAuthenticationToken|AuthenticationError|401|403')
-}
-
-function Invoke-AzLoginForGraph {
-    Write-Host ""
-    Write-Host "Re-authenticating Azure CLI with Microsoft Graph 'Sites.Read.All' scope..." -ForegroundColor Yellow
-    Write-Host "  Running: az login --scope https://graph.microsoft.com/Sites.Read.All" -ForegroundColor DarkGray
-    & az login --scope https://graph.microsoft.com/Sites.Read.All --only-show-errors | Out-Null
-    return ($LASTEXITCODE -eq 0)
-}
-
-function Read-ManualSharepointInputs {
-    Write-Host ""
-    Write-Host "Falling back to manual site entry. The library and folder pickers will still run via Microsoft Graph." -ForegroundColor Yellow
-    $site = Read-Host "SharePoint site URL (e.g. https://contoso.sharepoint.com/sites/MySite)"
-    if (-not $site) { return $null }
-    return @{ site = $site }
-}
-
-if (-not $sharepointSiteAddress -or -not $sharepointFolderId) {
+$selectedSiteId = $null
+if (-not $sharepointSiteAddress) {
     Write-Host ""
     Write-Host "Fetching SharePoint sites accessible to your account from Microsoft Graph..." -ForegroundColor Yellow
+    $sitesResponse = Invoke-Graph `
+        -Url 'https://graph.microsoft.com/v1.0/sites' `
+        -UriParameters @('search=*', '$select=id,displayName,webUrl', '$top=100') `
+        -Quiet
+    $sites = @($sitesResponse.value | Where-Object { $_.displayName } | Sort-Object displayName)
 
-    # /sites?search=* enumerates sites the signed-in user has access to.
-    $sitesResponse = Invoke-Graph -Url 'https://graph.microsoft.com/v1.0/sites' -UriParameters @('search=*', '$select=id,displayName,webUrl', '$top=100')
-
-    # NOTE: We deliberately do NOT attempt 'az login --scope https://graph.microsoft.com/Sites.Read.All'.
-    # Many tenants block that flow with AADSTS65002 (the Azure CLI first-party app is not
-    # pre-authorized for Microsoft Graph). Fall back to manual site URL entry instead and let
-    # the library/folder pickers run via Graph against that specific site.
-
-    if (-not $sitesResponse -or -not $sitesResponse.value -or $sitesResponse.value.Count -eq 0) {
-        Write-Host ""
-        Write-Host "NOTE: The Azure CLI access token cannot enumerate SharePoint sites via Microsoft Graph search." -ForegroundColor Yellow
-        Write-Host "      (This is expected when the tenant has not pre-authorized the Azure CLI for 'Sites.Read.All'.)" -ForegroundColor DarkGray
-        Write-Host "      You can paste the site URL directly; the library and folder pickers will still run." -ForegroundColor Yellow
-        Write-Host ""
-        $manual = Read-ManualSharepointInputs
-        if (-not $manual) {
-            Write-Host "ERROR: No site provided. Set the values manually and re-run:" -ForegroundColor Red
-            Write-Host "         azd env set SHAREPOINT_SITE_ADDRESS https://contoso.sharepoint.com/sites/MySite" -ForegroundColor Red
-            Write-Host "         azd env set SHAREPOINT_FOLDER_ID    '/Shared Documents'" -ForegroundColor Red
-            exit 1
-        }
-        $sharepointSiteAddress = $manual.site
-        azd env set SHAREPOINT_SITE_ADDRESS $sharepointSiteAddress | Out-Null
-        Write-Host "Saved SHAREPOINT_SITE_ADDRESS=$sharepointSiteAddress" -ForegroundColor Green
-        $sitesResponse = $null
-    }
-
-    # Filter out entries with empty displayName (e.g. tenant root) and sort.
-    $sites = @()
-    if ($sitesResponse) {
-        $sites = @($sitesResponse.value | Where-Object { $_.displayName } | Sort-Object displayName)
-        if ($sites.Count -eq 0) { $sites = @($sitesResponse.value) }
-    }
-
-    $selectedSite = $null
-    if (-not $sharepointSiteAddress) {
-        $selectedSite = Select-FromList -Title 'Select a SharePoint site:' -Items $sites -LabelProperty 'displayName' -SubLabelProperty 'webUrl'
+    if ($sites.Count -gt 0) {
+        $selectedSite = Select-FromList `
+            -Title 'Select a SharePoint site:' `
+            -Items $sites `
+            -LabelProperty 'displayName' `
+            -SubLabelProperty 'webUrl'
         $sharepointSiteAddress = $selectedSite.webUrl
-        azd env set SHAREPOINT_SITE_ADDRESS $sharepointSiteAddress | Out-Null
-        Write-Host "Saved SHAREPOINT_SITE_ADDRESS=$sharepointSiteAddress" -ForegroundColor Green
+        $selectedSiteId = $selectedSite.id
     } else {
-        $selectedSite = $sites | Where-Object { $_.webUrl -eq $sharepointSiteAddress } | Select-Object -First 1
+        $sharepointSiteAddress = Read-Host "SharePoint site URL (for example, https://contoso.sharepoint.com/sites/MySite)"
     }
 
-    if (-not $sharepointFolderId) {
-        # Resolve the Graph site id, either from the search result or by URL.
-        $siteId = $null
-        if ($selectedSite -and $selectedSite.id) {
-            $siteId = $selectedSite.id
-        } else {
-            $uri = [Uri]$sharepointSiteAddress
-            $relPath = $uri.AbsolutePath.TrimEnd('/')
-            $resolveUrl = "https://graph.microsoft.com/v1.0/sites/$($uri.Host):$($relPath)"
-            $resolved = Invoke-Graph -Url $resolveUrl -UriParameters @('$select=id')
-            if ($resolved -and $resolved.id) { $siteId = $resolved.id }
-        }
-
-        if (-not $siteId) {
-            Write-Host "NOTE: Microsoft Graph could not resolve the site id (likely 'Sites.Read.All' is not consented for the Azure CLI)." -ForegroundColor Yellow
-            $manualFolder = Read-Host "Document library / folder path (press Enter for '/Shared Documents')"
-            if ([string]::IsNullOrWhiteSpace($manualFolder)) { $manualFolder = '/Shared Documents' }
-            $sharepointFolderId = $manualFolder
-        } else {
-            $drivesResponse = Invoke-Graph -Url "https://graph.microsoft.com/v1.0/sites/$siteId/drives" -UriParameters @('$select=id,name,webUrl')
-            if (-not $drivesResponse -or -not $drivesResponse.value -or $drivesResponse.value.Count -eq 0) {
-                Write-Host "NOTE: Microsoft Graph returned no document libraries for this site." -ForegroundColor Yellow
-                $manualFolder = Read-Host "Document library / folder path (press Enter for '/Shared Documents')"
-                if ([string]::IsNullOrWhiteSpace($manualFolder)) { $manualFolder = '/Shared Documents' }
-                $sharepointFolderId = $manualFolder
-            } else {
-                $drive = Select-FromList -Title 'Select a document library:' -Items $drivesResponse.value -LabelProperty 'name'
-                # The connector folderId accepts the human-readable
-                # server-relative path. The default 'Documents' library
-                # surfaces under '/Shared Documents' in the site URL.
-                $libraryRoot = if ($drive.name -eq 'Documents') { '/Shared Documents' } else { "/$($drive.name)" }
-
-                # Let the user pick the library root or drill into a subfolder.
-                $folderChoices = @(
-                    [pscustomobject]@{ name = "(library root: $libraryRoot)"; relativePath = '' }
-                )
-                $childrenResponse = Invoke-Graph -Url "https://graph.microsoft.com/v1.0/drives/$($drive.id)/root/children" -UriParameters @('$select=name,folder', '$top=200') -Quiet
-                if ($childrenResponse -and $childrenResponse.value) {
-                    foreach ($child in $childrenResponse.value) {
-                        if ($child.folder) {
-                            $folderChoices += [pscustomobject]@{ name = $child.name; relativePath = "/$($child.name)" }
-                        }
-                    }
-                }
-
-                if ($folderChoices.Count -eq 1) {
-                    $sharepointFolderId = $libraryRoot
-                } else {
-                    $picked = Select-FromList -Title 'Select a folder (or library root):' -Items $folderChoices -LabelProperty 'name'
-                    $sharepointFolderId = $libraryRoot + $picked.relativePath
-                }
-            }
-        }
-        azd env set SHAREPOINT_FOLDER_ID $sharepointFolderId | Out-Null
-        Write-Host "Saved SHAREPOINT_FOLDER_ID=$sharepointFolderId" -ForegroundColor Green
+    if (-not $sharepointSiteAddress) {
+        Write-Host "ERROR: SHAREPOINT_SITE_ADDRESS is required." -ForegroundColor Red
+        exit 1
     }
+    azd env set SHAREPOINT_SITE_ADDRESS $sharepointSiteAddress | Out-Null
+}
+
+if (-not $selectedSiteId) {
+    try {
+        $siteUri = [Uri]$sharepointSiteAddress
+        $relativePath = $siteUri.AbsolutePath.TrimEnd('/')
+        $resolvedSite = Invoke-Graph `
+            -Url "https://graph.microsoft.com/v1.0/sites/$($siteUri.Host):$relativePath" `
+            -UriParameters @('$select=id') `
+            -Quiet
+        $selectedSiteId = $resolvedSite.id
+    } catch {
+        $selectedSiteId = $null
+    }
+}
+
+$selectedListId = $null
+if (-not $sharepointTable) {
+    if ($selectedSiteId) {
+        $listsResponse = Invoke-Graph `
+            -Url "https://graph.microsoft.com/v1.0/sites/$selectedSiteId/lists" `
+            -UriParameters @('$select=id,displayName,list,webUrl', '$top=200') `
+            -Quiet
+        $documentLibraries = @(
+            $listsResponse.value |
+                Where-Object { $_.list.template -eq 'documentLibrary' } |
+                Sort-Object displayName
+        )
+        if ($documentLibraries.Count -gt 0) {
+            $selectedLibrary = Select-FromList `
+                -Title 'Select a SharePoint document library:' `
+                -Items $documentLibraries `
+                -LabelProperty 'displayName' `
+                -SubLabelProperty 'webUrl'
+            $sharepointTable = $selectedLibrary.id
+            $selectedListId = $selectedLibrary.id
+        }
+    }
+
+    if (-not $sharepointTable) {
+        $sharepointTable = Read-Host "SharePoint document library ID or name"
+    }
+    if (-not $sharepointTable) {
+        Write-Host "ERROR: SHAREPOINT_TABLE is required." -ForegroundColor Red
+        exit 1
+    }
+    azd env set SHAREPOINT_TABLE $sharepointTable | Out-Null
+}
+
+if (-not $sharepointFolderPath -and -not $sharepointTableWasConfigured) {
+    $listIdForFolders = if ($selectedListId) { $selectedListId } else { $sharepointTable }
+    $folderChoices = @()
+    if ($selectedSiteId -and $listIdForFolders) {
+        $childrenResponse = Invoke-Graph `
+            -Url "https://graph.microsoft.com/v1.0/sites/$selectedSiteId/lists/$listIdForFolders/drive/root/children" `
+            -UriParameters @('$select=name,folder', '$top=200') `
+            -Quiet
+        $folderChoices = @(
+            [pscustomobject]@{ displayName = '(whole library)'; value = '' }
+            $childrenResponse.value |
+                Where-Object { $_.folder } |
+                Sort-Object name |
+                ForEach-Object { [pscustomobject]@{ displayName = $_.name; value = "/$($_.name)" } }
+        )
+    }
+
+    if ($folderChoices.Count -gt 1) {
+        $selectedFolder = Select-FromList `
+            -Title 'Select a folder, or use the whole library:' `
+            -Items $folderChoices `
+            -LabelProperty 'displayName'
+        $sharepointFolderPath = $selectedFolder.value
+    } else {
+        $sharepointFolderPath = Read-Host "Optional folder path (press Enter for the whole library)"
+    }
+
+    if ($sharepointFolderPath) {
+        azd env set SHAREPOINT_FOLDER_PATH $sharepointFolderPath | Out-Null
+    }
+}
+
+$parameterValues = @{
+    SHAREPOINT_SITE_ADDRESS = $sharepointSiteAddress
+    SHAREPOINT_TABLE = $sharepointTable
+    SHAREPOINT_FOLDER_PATH = $sharepointFolderPath
 }
 
 # --- Verify the connector-namespace az CLI extension is installed ----------
 $extInstalled = az extension show --name connector-namespace --query name -o tsv 2>$null
 if (-not $extInstalled) {
     Write-Host "ERROR: 'connector-namespace' Azure CLI extension is not installed." -ForegroundColor Red
-    Write-Host "       Download the latest 'connector_namespace-*.whl' from" -ForegroundColor Red
-    Write-Host "       https://github.com/Azure/Connectors/releases and run:" -ForegroundColor Red
-    Write-Host "         az extension add --source <wheel-url-or-path>" -ForegroundColor Red
-    Write-Host "       Then re-run: azd hooks run postdeploy" -ForegroundColor Red
+    Write-Host "       Download the latest connector_namespace wheel from:" -ForegroundColor Red
+    Write-Host "       https://github.com/Azure/Connectors/releases" -ForegroundColor Red
     exit 2
 }
-
-# --- Trigger configs --------------------------------------------------------
-# One entry per Functions trigger in this app. operationName values come from
-# the SharePoint Online connector swagger:
-#   https://learn.microsoft.com/en-us/connectors/sharepointonline/
-$triggers = @(
-    @{ functionName = 'OnSharepointNewFile';     operationName = 'OnNewFile';     parameters = @(@{ name = 'dataset'; value = $sharepointSiteAddress }, @{ name = 'folderId'; value = $sharepointFolderId }) },
-    @{ functionName = 'OnSharepointUpdatedFile'; operationName = 'OnUpdatedFile'; parameters = @(@{ name = 'dataset'; value = $sharepointSiteAddress }, @{ name = 'folderId'; value = $sharepointFolderId }) }
-)
 
 # --- Authorize the SharePoint connection (OAuth consent) --------------------
 function Test-ConnectionExists {
     param([Parameter(Mandatory)] [string] $ConnectionName)
+
     az connector-namespace connection show `
-        -g $resourceGroupName --namespace $connectorNamespaceName `
-        -n $ConnectionName -o none 2>$null
+        -g $resourceGroupName `
+        --namespace $connectorNamespaceName `
+        -n $ConnectionName `
+        -o none 2>$null
     return ($LASTEXITCODE -eq 0)
 }
 
-function New-SharepointConnection {
+function Add-ConnectionAccessPolicy {
+    param(
+        [Parameter(Mandatory)] [string] $ConnectionName,
+        [Parameter(Mandatory)] [string] $PolicyName,
+        [Parameter(Mandatory)] [string] $PrincipalObjectId,
+        [Parameter(Mandatory)] [string] $TenantId,
+        [switch] $Required
+    )
+
+    az connector-namespace connection access-policy create `
+        -g $resourceGroupName `
+        --namespace $connectorNamespaceName `
+        --connection-name $ConnectionName `
+        -n $PolicyName `
+        --principal-type 'ActiveDirectory' `
+        --principal-object-id $PrincipalObjectId `
+        --principal-tenant-id $TenantId `
+        -o none 2>$null
+
+    if ($LASTEXITCODE -ne 0) {
+        if ($Required) {
+            throw "Failed to create required connection access policy '$PolicyName'."
+        }
+        Write-Host "   WARNING: could not create optional access policy '$PolicyName'." -ForegroundColor Yellow
+    }
+}
+
+function New-SharePointConnection {
     param([Parameter(Mandatory)] [string] $ConnectionName)
+
     Write-Host "-> Creating SharePoint connection '$ConnectionName' on namespace '$connectorNamespaceName'..." -ForegroundColor Yellow
     az connector-namespace connection create `
         -g $resourceGroupName `
         --namespace $connectorNamespaceName `
         -n $ConnectionName `
-        --connector-name 'sharepointonline'
+        --connector-name 'sharepointonline' `
+        -o none
     if ($LASTEXITCODE -ne 0) {
-        Write-Host "   Failed to create connection '$ConnectionName'." -ForegroundColor Red
         return $false
     }
 
-    $functionAppPrincipalId = az functionapp identity show -g $resourceGroupName -n $functionAppName --query principalId -o tsv 2>$null
-    if ($functionAppPrincipalId) {
-        $tenantId = az account show --query tenantId -o tsv
-        Write-Host "   Granting function-app MI ($functionAppPrincipalId) access to connection..." -ForegroundColor Cyan
-        az connector-namespace connection access-policy create `
-            -g $resourceGroupName `
-            --namespace $connectorNamespaceName `
-            --connection-name $ConnectionName `
-            -n 'functionapp-msi' `
-            --principal-type 'ActiveDirectory' `
-            --principal-object-id $functionAppPrincipalId `
-            --principal-tenant-id $tenantId 2>$null | Out-Null
-    } else {
-        Write-Host "   WARNING: function-app MI principalId not found; skipping access policy." -ForegroundColor Yellow
+    $tenantId = az account show --query tenantId -o tsv
+    $functionAppPrincipalId = az functionapp identity show `
+        -g $resourceGroupName `
+        -n $functionAppName `
+        --query principalId `
+        -o tsv
+    $namespacePrincipalId = az resource show `
+        --ids $namespaceResourceId `
+        --api-version $apiVersion `
+        --query identity.principalId `
+        -o tsv
+
+    if (-not $functionAppPrincipalId -or -not $namespacePrincipalId) {
+        throw "Required managed identity principal IDs were not available for connection access policies."
     }
+
+    Add-ConnectionAccessPolicy -ConnectionName $ConnectionName -PolicyName 'functionapp-msi' -PrincipalObjectId $functionAppPrincipalId -TenantId $tenantId -Required
+    Add-ConnectionAccessPolicy -ConnectionName $ConnectionName -PolicyName 'namespace-trigger-runtime' -PrincipalObjectId $namespacePrincipalId -TenantId $tenantId -Required
 
     $userPrincipalId = az ad signed-in-user show --query id -o tsv 2>$null
     if ($userPrincipalId) {
-        $tenantId = az account show --query tenantId -o tsv
-        Write-Host "   Granting deployer user ($userPrincipalId) access to connection..." -ForegroundColor Cyan
-        az connector-namespace connection access-policy create `
-            -g $resourceGroupName `
-            --namespace $connectorNamespaceName `
-            --connection-name $ConnectionName `
-            -n 'dev-user' `
-            --principal-type 'ActiveDirectory' `
-            --principal-object-id $userPrincipalId `
-            --principal-tenant-id $tenantId 2>$null | Out-Null
+        Add-ConnectionAccessPolicy -ConnectionName $ConnectionName -PolicyName 'dev-user' -PrincipalObjectId $userPrincipalId -TenantId $tenantId
     }
+
     return $true
 }
 
 function Invoke-AuthorizeConnection {
-    param(
-        [Parameter(Mandatory)] [string] $ConnectionName,
-        [Parameter(Mandatory)] [string] $Description
-    )
-    Write-Host "-> Authorizing $Description connection: $ConnectionName" -ForegroundColor Cyan
+    param([Parameter(Mandatory)] [string] $ConnectionName)
+
+    Write-Host "-> Authorizing SharePoint Online connection: $ConnectionName" -ForegroundColor Cyan
 
     if (-not (Test-ConnectionExists -ConnectionName $ConnectionName)) {
-        Write-Host "   Connection '$ConnectionName' not found on namespace '$connectorNamespaceName'." -ForegroundColor Yellow
-        if (-not (New-SharepointConnection -ConnectionName $ConnectionName)) {
+        if (-not (New-SharePointConnection -ConnectionName $ConnectionName)) {
             return $false
         }
     }
 
     $currentStatus = az connector-namespace connection show `
-        -g $resourceGroupName --namespace $connectorNamespaceName `
-        -n $ConnectionName --query "properties.overallStatus" -o tsv 2>$null
-    if ($currentStatus -and $currentStatus.ToLower() -eq "connected") {
+        -g $resourceGroupName `
+        --namespace $connectorNamespaceName `
+        -n $ConnectionName `
+        --query 'properties.overallStatus' `
+        -o tsv 2>$null
+    if ($currentStatus -and $currentStatus.ToLowerInvariant() -eq 'connected') {
         Write-Host "   already Connected; skipping consent flow" -ForegroundColor Green
         return $true
     }
 
-    $paramsFile = Join-Path ([System.IO.Path]::GetTempPath()) ("consent-params-" + [guid]::NewGuid().ToString() + ".json")
-    '[{"parameterName":"token","redirectUrl":"https://portal.azure.com"}]' | Set-Content -Path $paramsFile -Encoding utf8
+    $parametersPath = Join-Path $PSScriptRoot (".consent-parameters-{0}.json" -f [guid]::NewGuid())
+    [IO.File]::WriteAllText(
+        $parametersPath,
+        '[{"parameterName":"token","redirectUrl":"https://portal.azure.com"}]',
+        [Text.UTF8Encoding]::new($false))
     try {
         $consentJson = $null
-        for ($i = 0; $i -lt 5; $i++) {
+        for ($attempt = 1; $attempt -le 5; $attempt++) {
             $consentJson = az connector-namespace connection list-consent-links `
-                -g $resourceGroupName --namespace $connectorNamespaceName `
-                --connection-name $ConnectionName --parameters "@$paramsFile" -o json
-            if ($LASTEXITCODE -eq 0 -and $consentJson) { break }
-            Write-Host "   list-consent-links attempt $($i + 1) failed; retrying in 5s..." -ForegroundColor Yellow
+                -g $resourceGroupName `
+                --namespace $connectorNamespaceName `
+                --connection-name $ConnectionName `
+                --parameters "@$parametersPath" `
+                -o json
+            if ($LASTEXITCODE -eq 0 -and $consentJson) {
+                break
+            }
+            Write-Host "   list-consent-links attempt $attempt failed; retrying in 5s..." -ForegroundColor Yellow
             Start-Sleep -Seconds 5
         }
     } finally {
-        Remove-Item $paramsFile -ErrorAction SilentlyContinue
+        Remove-Item $parametersPath -ErrorAction SilentlyContinue
     }
+
     if (-not $consentJson) {
-        Write-Host "   list-consent-links returned no output after retries" -ForegroundColor Red
         return $false
     }
-    $parsed = $consentJson | ConvertFrom-Json
-    $link = $null
-    if ($parsed.value -and $parsed.value.Count -gt 0) {
-        $link = $parsed.value[0].link
-    } elseif ($parsed.link) {
-        $link = $parsed.link
+
+    $parsedConsent = ($consentJson -join [Environment]::NewLine) | ConvertFrom-Json
+    $link = if ($parsedConsent.value -and $parsedConsent.value.Count -gt 0) {
+        $parsedConsent.value[0].link
+    } else {
+        $parsedConsent.link
     }
     if (-not $link) {
-        Write-Host "   list-consent-links returned no link. Raw response:" -ForegroundColor Red
-        Write-Host "   $consentJson" -ForegroundColor DarkGray
         return $false
     }
 
     Write-Host "   opening browser for OAuth consent..." -ForegroundColor Cyan
-    Write-Host "   (if no tab opens, paste this URL manually:" -ForegroundColor Cyan
-    Write-Host "      $link)" -ForegroundColor Cyan
-    try { Start-Process $link | Out-Null } catch { Write-Host "   Start-Process failed: $_" -ForegroundColor Yellow }
+    try {
+        Start-Process $link | Out-Null
+    } catch {
+        return $false
+    }
 
     $deadline = (Get-Date).AddMinutes(5)
-    $lastStatus = ""
+    $lastStatus = ''
     while ((Get-Date) -lt $deadline) {
-        $s = az connector-namespace connection show `
-            -g $resourceGroupName --namespace $connectorNamespaceName `
-            -n $ConnectionName --query "properties.overallStatus" -o tsv 2>$null
-        if ($s -ne $lastStatus) {
-            Write-Host "   status: $(if ($s) { $s } else { '?' })" -ForegroundColor Cyan
-            $lastStatus = $s
+        $status = az connector-namespace connection show `
+            -g $resourceGroupName `
+            --namespace $connectorNamespaceName `
+            -n $ConnectionName `
+            --query 'properties.overallStatus' `
+            -o tsv 2>$null
+        if ($status -ne $lastStatus) {
+            Write-Host "   status: $(if ($status) { $status } else { '?' })" -ForegroundColor Cyan
+            $lastStatus = $status
         }
-        if ($s -and $s.ToLower() -eq "connected") {
-            Write-Host "   ✓ $ConnectionName authenticated" -ForegroundColor Green
+        if ($status -and $status.ToLowerInvariant() -eq 'connected') {
+            Write-Host "   connection authenticated" -ForegroundColor Green
             return $true
         }
         Start-Sleep -Seconds 3
     }
-    Write-Host "   timed out waiting for consent (5 min)." -ForegroundColor Yellow
+
     return $false
 }
 
 Write-Host ""
 Write-Host "Authorizing SharePoint Online connection via Azure CLI..." -ForegroundColor Yellow
-$authorized = Invoke-AuthorizeConnection -ConnectionName $sharepointConnectionName -Description "SharePoint Online"
-if (-not $authorized) {
-    Write-Host ""
-    Write-Host "ERROR: SharePoint connection is not Connected. Cannot create triggers." -ForegroundColor Red
-    Write-Host "       Complete the OAuth consent flow, then re-run: azd hooks run postdeploy" -ForegroundColor Red
+if (-not (Invoke-AuthorizeConnection -ConnectionName $sharepointConnectionName)) {
+    Write-Host "ERROR: SharePoint connection is not Connected. Complete OAuth consent and rerun the postdeploy hook." -ForegroundColor Red
     exit 1
 }
 
-# --- Create Connector Namespace trigger configs -----------------------------
-Write-Host ""
-Write-Host "Fetching connector extension key for $functionAppName..." -ForegroundColor Cyan
-$connectorExtensionKey = (az functionapp keys list -g $resourceGroupName -n $functionAppName --query "systemKeys.connector_extension" -o tsv)
-if (-not $connectorExtensionKey) {
-    Write-Host "ERROR: could not fetch connector_extension system key from $functionAppName." -ForegroundColor Red
-    exit 1
-}
-
-$connectionDetails = (@{ connectorName = 'sharepointonline'; connectionName = $sharepointConnectionName } | ConvertTo-Json -Compress)
-$script:triggerFailures = @()
-
-function New-JsonArgFile {
-    param([Parameter(Mandatory)] [string] $Json)
-    $path = Join-Path ([System.IO.Path]::GetTempPath()) ("trigger-arg-" + [guid]::NewGuid().ToString() + ".json")
-    Set-Content -Path $path -Value $Json -Encoding utf8
-    return $path
-}
-
-foreach ($t in $triggers) {
-    $functionName = $t.functionName
-    $operationName = $t.operationName
-    if ($t.parameters.Count -eq 0) {
-        $parameters = '[]'
-    } else {
-        $parameters = ($t.parameters | ConvertTo-Json -Compress -Depth 5 -AsArray)
-    }
-
-    $triggerName = "$sharepointConnectionName-$($functionName.ToLower())"
-    $callbackUrl = "https://$functionAppName.azurewebsites.net/runtime/webhooks/connector?functionName=$functionName"
-    $notificationDetails = (@{
-        callbackUrl = $callbackUrl
-        httpMethod = 'Post'
-        authentication = @{
-            type = "QueryString"
-            name = "code"
-            value = $connectorExtensionKey
+# --- Create the retained Poll Trigger Config --------------------------------
+$parameters = @(Resolve-OperationParameters -Definitions @($descriptor.parameters) -EnvironmentValues $parameterValues)
+$requestBody = @{
+    properties = @{
+        connectionDetails = @{
+            connectionName = $sharepointConnectionName
+            connectorName = 'sharepointonline'
         }
-    } | ConvertTo-Json -Depth 3 -Compress)
-
-    Write-Host ""
-    Write-Host "Creating trigger '$triggerName' for $functionName ($operationName)..." -ForegroundColor Yellow
-
-    az connector-namespace trigger delete `
-        -g $resourceGroupName --namespace $connectorNamespaceName `
-        -n $triggerName --yes 2>$null | Out-Null
-
-    $connFile   = New-JsonArgFile -Json $connectionDetails
-    $paramsFile = New-JsonArgFile -Json $parameters
-    $notifFile  = New-JsonArgFile -Json $notificationDetails
-    try {
-        az connector-namespace trigger create `
-            -g $resourceGroupName `
-            --namespace $connectorNamespaceName `
-            -n $triggerName `
-            --connection-details "@$connFile" `
-            --operation-name $operationName `
-            --parameters "@$paramsFile" `
-            --notification-details "@$notifFile" `
-            --state 'Enabled' `
-            --description "SharePoint $operationName -> $functionName"
-    } finally {
-        Remove-Item $connFile, $paramsFile, $notifFile -ErrorAction SilentlyContinue
+        deliveryMode = 'Poll'
+        description = $descriptor.description
+        operationName = $descriptor.operationName
+        parameters = $parameters
+        state = 'Enabled'
+        type = 'NotSpecified'
     }
+} | ConvertTo-Json -Depth 8 -Compress
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "WARNING: Failed to create trigger '$triggerName'. Continuing with remaining triggers." -ForegroundColor Yellow
-        $script:triggerFailures += $triggerName
-    }
+$requestBodyPath = Join-Path $PSScriptRoot (".trigger-config-{0}.json" -f [guid]::NewGuid())
+[IO.File]::WriteAllText($requestBodyPath, $requestBody, [Text.UTF8Encoding]::new($false))
+try {
+    $triggerConfigJson = az rest `
+        --method put `
+        --uri "$triggerConfigResourceId?api-version=$apiVersion" `
+        --body "@$requestBodyPath" `
+        --only-show-errors `
+        -o json
+} finally {
+    Remove-Item $requestBodyPath -ErrorAction SilentlyContinue
+}
+if ($LASTEXITCODE -ne 0 -or -not $triggerConfigJson) {
+    Write-Host "ERROR: failed to create the Connector Namespace Poll Trigger Config." -ForegroundColor Red
+    exit 1
 }
 
-Write-Host ""
-if ($triggerFailures.Count -eq 0) {
-    Write-Host "✅ Connector Namespace trigger configs created successfully." -ForegroundColor Green
+$triggerConfig = ($triggerConfigJson -join [Environment]::NewLine) | ConvertFrom-Json
+if (-not $triggerConfig.properties.pollingEndpoints) {
+    $triggerConfigJson = az rest `
+        --method get `
+        --uri "$triggerConfigResourceId?api-version=$apiVersion" `
+        --only-show-errors `
+        -o json
+    if ($LASTEXITCODE -ne 0 -or -not $triggerConfigJson) {
+        Write-Host "ERROR: failed to retrieve the Connector Namespace Poll Trigger Config." -ForegroundColor Red
+        exit 1
+    }
+    $triggerConfig = ($triggerConfigJson -join [Environment]::NewLine) | ConvertFrom-Json
+}
+
+$receiveUriText = [string]$triggerConfig.properties.pollingEndpoints.receiveUri
+if ($triggerConfig.properties.state -ne 'Enabled' -or [string]::IsNullOrWhiteSpace($receiveUriText)) {
+    Write-Host "ERROR: the Poll Trigger Config was not enabled with a receive endpoint." -ForegroundColor Red
+    exit 1
+}
+
+$receiveUri = [Uri]$receiveUriText
+$pathMatch = [regex]::Match(
+    $receiveUri.AbsolutePath,
+    '^(?<base>/api(?:/connectorGateways/[^/]+)?)/triggerConfigs/[^/]+/receive$',
+    [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+if (-not $pathMatch.Success) {
+    Write-Host "ERROR: the service-generated receive endpoint has an unsupported path." -ForegroundColor Red
+    exit 1
+}
+
+$endpointBuilder = [UriBuilder]$receiveUri
+$endpointBuilder.Path = if ($pathMatch.Groups['base'].Value -eq '/api') {
+    ''
 } else {
-    Write-Host "⚠  Some trigger configs failed: $($triggerFailures -join ', ')" -ForegroundColor Yellow
+    $pathMatch.Groups['base'].Value
+}
+$endpointBuilder.Query = ''
+$endpointBuilder.Fragment = ''
+$pollingEndpoint = $endpointBuilder.Uri.AbsoluteUri
+
+az functionapp config appsettings set `
+    -g $resourceGroupName `
+    -n $functionAppName `
+    --settings `
+        "ConnectorNamespace__pollingEndpoint=$pollingEndpoint" `
+        'ConnectorNamespace__credential=managedidentity' `
+        "ConnectorTriggerConfigName=$($descriptor.triggerConfigName)" `
+    -o none
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "ERROR: failed to configure the Function App Poll settings." -ForegroundColor Red
+    exit 1
 }
 
 Write-Host ""
-Write-Host "✅ Post-deployment configuration complete." -ForegroundColor Green
-Write-Host ""
+Write-Host "Poll Trigger Config '$($descriptor.triggerConfigName)' is Enabled for $($descriptor.functionName)." -ForegroundColor Green
+Write-Host "Post-deployment configuration complete." -ForegroundColor Green

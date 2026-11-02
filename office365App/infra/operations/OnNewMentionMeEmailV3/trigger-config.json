@@ -1,0 +1,12 @@
+{
+  "functionName": "OnNewMentionMeEmail",
+  "triggerConfigName": "OnNewMentionMeEmailV3",
+  "operationName": "OnNewMentionMeEmailV3",
+  "description": "Poll for Office 365 emails that mention the connected user.",
+  "parameters": [
+    {
+      "name": "folderPath",
+      "value": "Inbox"
+    }
+  ]
+}

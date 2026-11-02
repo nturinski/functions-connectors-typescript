@@ -3,7 +3,7 @@
   "Values": {
     "FUNCTIONS_WORKER_RUNTIME": "node",
     "AzureWebJobsStorage": "UseDevelopmentStorage=true",
-    "SharepointConnection": "<your-sharepoint-connector-runtime-url>",
-    "SHAREPOINT_TOKEN": "<your-token-or-use-managed-identity>"
+    "ConnectorNamespace__pollingEndpoint": "<your-connector-namespace-polling-endpoint>",
+    "ConnectorTriggerConfigName": "<your-trigger-config-name>"
   }
 }

@@ -171,7 +171,6 @@ var storageConnectionString = 'DefaultEndpointsProtocol=https;AccountName=${stor
 
 var baseAppSettings = {
   APPLICATIONINSIGHTS_CONNECTION_STRING: appInsights.properties.ConnectionString
-  SharepointConnection: connectorNamespace.outputs.sharepointConnectionRuntimeUrl
 }
 
 var identityStorageSettings = {

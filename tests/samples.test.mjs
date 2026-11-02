@@ -72,6 +72,17 @@ for (const [appName, expectedNames] of selected) {
             assert.deepEqual([...registrations.keys()].sort(), [...expectedNames].sort());
         });
 
+        if (appName === 'office365App' || appName === 'sharepointApp') {
+            await t.test('all connector-specific wrappers forward Poll binding options', () => {
+                for (const name of expectedNames) {
+                    const options = registrations.get(name);
+                    assert.equal(options.deliveryMode, 'Poll');
+                    assert.equal(options.connection, 'ConnectorNamespace');
+                    assert.equal(options.triggerConfigName, '%ConnectorTriggerConfigName%');
+                }
+            });
+        }
+
         for (const [name, { handler }] of registrations) {
             const items = [itemFor(name, 1), itemFor(name, 2)];
             const batch = { body: { value: items }, headers: { 'x-test': 'preserved' } };

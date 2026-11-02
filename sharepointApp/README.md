@@ -4,8 +4,14 @@ Azure Functions app demonstrating typed SharePoint Online triggers from [`@azure
 
 | Function | Connector operation | Description |
 | -------- | ------------------- | ----------- |
-| `OnSharepointNewFile` | `OnNewFile` | New file is created in the configured library or folder |
-| `OnSharepointUpdatedFile` | `OnUpdatedFile` | Existing file in the configured library or folder is modified |
+| `OnSharepointNewFile` | `GetOnNewFileItems` | New file is created in the configured library or folder |
+| `OnSharepointUpdatedFile` | `GetOnUpdatedFileItems` | A file is created or modified in the configured library or folder |
+
+Each operation owns its listed source file and the matching
+`infra/operations/<operationId>` directory. A generated project retains one
+pair. If you deploy this repository checkout directly, first remove the sibling
+source and operation directory; the postdeploy hook intentionally fails unless
+exactly one operation descriptor remains.
 
 ## Prerequisites
 
@@ -21,7 +27,7 @@ azd auth login
 azd up
 ```
 
-The deployment builds the TypeScript app and runs the [postdeploy hook](azure.yaml). Enter the SharePoint site address and folder when prompted, and complete OAuth consent in your browser. The hook creates two triggers for the chosen location.
+The deployment builds the TypeScript app and runs the [postdeploy hook](azure.yaml). Select the SharePoint site, document library, and optional folder when prompted, then complete OAuth consent in your browser. The hook creates the one retained Trigger Config in Poll mode, derives its polling endpoint, and configures the Function App.
 
 ## Resources provisioned
 
@@ -33,11 +39,16 @@ The Preview Functions Extension Bundle is already configured in [host.json](host
 
 ## Connector configuration
 
-The hook saves your selections as `SHAREPOINT_SITE_ADDRESS` and `SHAREPOINT_FOLDER_ID` on the azd environment. To skip these prompts, set them in advance:
+The descriptors use the canonical SharePoint trigger parameters: `dataset`,
+`table`, and optional `folderPath`. The hook saves those values as
+`SHAREPOINT_SITE_ADDRESS`, `SHAREPOINT_TABLE`, and
+`SHAREPOINT_FOLDER_PATH` on the azd environment. To skip the prompts, set them
+in advance:
 
 ```sh
 azd env set SHAREPOINT_SITE_ADDRESS "https://contoso.sharepoint.com/sites/MySite"
-azd env set SHAREPOINT_FOLDER_ID "/Shared Documents"
+azd env set SHAREPOINT_TABLE "<document-library-id-or-name>"
+azd env set SHAREPOINT_FOLDER_PATH "/Optional/Subfolder"
 ```
 
 These settings do not skip any required OAuth consent. To repeat connection and trigger setup without redeploying:
@@ -48,7 +59,7 @@ azd hooks run postdeploy
 
 ## Verify
 
-Open [Connector Namespaces](https://connectors.azure.com/) and select the namespace created by azd. Expect one SharePoint Online connection in `Connected` state and two triggers in `Enabled` state.
+Open [Connector Namespaces](https://connectors.azure.com/) and select the namespace created by azd. Expect one SharePoint Online connection in `Connected` state and one retained Trigger Config in `Enabled` state.
 
 Create or modify a file in the selected location, then inspect the Function App logs in Application Insights. If the connection is unauthenticated or triggers are missing, rerun the hook and complete consent.
 
@@ -61,7 +72,10 @@ npm install
 npm start
 ```
 
-This builds the app and starts the Functions host. Receiving connector events locally also requires a reachable HTTPS callback and a separate trigger configuration targeting it; `npm start` does not create subscriptions.
+This builds the app and starts the Functions host. For local Poll delivery,
+replace the placeholders in `local.settings.json` with the gateway-level
+polling endpoint and retained Trigger Config name. Local development uses the
+standard Functions developer credential chain.
 
 ## More
 

@@ -3,9 +3,8 @@
 
 // ----------------------------------------------------------------------------
 // Connector Namespace + a single SharePoint Online connection. Access policies
-// grant the function-app managed identity (and, optionally, the deployer
-// user) permission to call the connection at runtime so the connector
-// trigger callback and SDK calls are authorized.
+// grant the namespace polling runtime, function-app managed identity, and
+// optionally the deployer user permission to call the connection.
 // ----------------------------------------------------------------------------
 
 @minLength(1)
@@ -52,6 +51,20 @@ resource sharepointConnectionMsiAccessPolicy 'Microsoft.Web/connectorGateways/co
       type: 'ActiveDirectory'
       identity: {
         objectId: functionAppPrincipalId
+        tenantId: tenantId
+      }
+    }
+  }
+}
+
+resource sharepointConnectionNamespaceAccessPolicy 'Microsoft.Web/connectorGateways/connections/accessPolicies@2026-05-01-preview' = {
+  parent: sharepointConnection
+  name: 'namespace-trigger-runtime'
+  properties: {
+    principal: {
+      type: 'ActiveDirectory'
+      identity: {
+        objectId: connectorNamespace.identity.principalId
         tenantId: tenantId
       }
     }

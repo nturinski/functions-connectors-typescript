@@ -1,0 +1,23 @@
+{
+  "functionName": "OnSharepointUpdatedFile",
+  "triggerConfigName": "GetOnUpdatedFileItems",
+  "operationName": "GetOnUpdatedFileItems",
+  "description": "Poll for new or updated SharePoint file items.",
+  "parameters": [
+    {
+      "name": "dataset",
+      "valueFromEnvironment": "SHAREPOINT_SITE_ADDRESS",
+      "required": true
+    },
+    {
+      "name": "table",
+      "valueFromEnvironment": "SHAREPOINT_TABLE",
+      "required": true
+    },
+    {
+      "name": "folderPath",
+      "valueFromEnvironment": "SHAREPOINT_FOLDER_PATH",
+      "required": false
+    }
+  ]
+}

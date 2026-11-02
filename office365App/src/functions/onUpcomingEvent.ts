@@ -3,8 +3,12 @@
 
 import { InvocationContext } from '@azure/functions';
 import { CalendarEventTriggerContext, connectors } from '@azure/functions-extensions-connectors';
+import type { PollConnectorTriggerOptions } from '../pollConnectorTriggerOptions.js';
 
-connectors.office365.onUpcomingEvent('OnUpcomingEvent', {
+const onUpcomingEventOptions = {
+    deliveryMode: 'Poll',
+    connection: 'ConnectorNamespace',
+    triggerConfigName: '%ConnectorTriggerConfigName%',
     handler: async (context: CalendarEventTriggerContext, invocationContext: InvocationContext) => {
         invocationContext.log('OnUpcomingEvent trigger received.');
 
@@ -15,4 +19,6 @@ connectors.office365.onUpcomingEvent('OnUpcomingEvent', {
 
         return context.rawPayload;
     },
-});
+} satisfies Parameters<typeof connectors.office365.onUpcomingEvent>[1] & PollConnectorTriggerOptions;
+
+connectors.office365.onUpcomingEvent('OnUpcomingEvent', onUpcomingEventOptions);

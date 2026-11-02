@@ -17,13 +17,18 @@ TypeScript samples for the [Azure Functions Connector Samples](https://github.co
 
 Each folder is a self-contained Functions app with its own `azure.yaml`, infrastructure, and source code. Open a sample README for deployment, connector configuration, and verification steps. The five connector-specific samples configure connections and triggers through deployment hooks; `genericApp` requires manual connector setup.
 
+The Office 365 and SharePoint folders are also project-template catalogs. Each
+operation owns one function source file and one directory under
+`infra/operations`. Template materialization removes every nonselected owned
+path, leaving shared authentication, deployment, and infrastructure unchanged.
+
 ## More triggers and operations
 
 See the [Operations to Azure Functions Signature Mapping](https://github.com/Azure/azure-functions-connector-extension/blob/main/docs/operations-functions-match.md) for supported connector triggers and their TypeScript signatures. The [Azure Connectors Node.js SDK](https://github.com/Azure/Connectors-NodeJS-SDK) provides typed clients for calling connector actions. These samples pin the SDK to [`@azure/connectors@0.3.0`](https://www.npmjs.com/package/@azure/connectors/v/0.3.0).
 
 ## Tests
 
-Run `npm test` from a sample directory to build its TypeScript source and run the offline smoke tests. See [tests/README.md](tests/README.md) for coverage, running all six samples together, and the local SDK archive fallback.
+Run `npm test` from a sample directory to build its TypeScript source and run the offline smoke tests. Office 365 and SharePoint also run deterministic operation-ownership tests. See [tests/README.md](tests/README.md) for coverage, running the repository tests together, and the local SDK archive fallback.
 
 ## Prerequisites
 

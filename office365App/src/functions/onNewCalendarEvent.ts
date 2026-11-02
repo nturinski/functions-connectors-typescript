@@ -3,8 +3,12 @@
 
 import { InvocationContext } from '@azure/functions';
 import { CalendarEventTriggerContext, connectors } from '@azure/functions-extensions-connectors';
+import type { PollConnectorTriggerOptions } from '../pollConnectorTriggerOptions.js';
 
-connectors.office365.onNewCalendarEvent('OnNewCalendarEvent', {
+const onNewCalendarEventOptions = {
+    deliveryMode: 'Poll',
+    connection: 'ConnectorNamespace',
+    triggerConfigName: '%ConnectorTriggerConfigName%',
     handler: async (context: CalendarEventTriggerContext, invocationContext: InvocationContext) => {
         invocationContext.log('OnNewCalendarEvent trigger received.');
 
@@ -19,4 +23,6 @@ connectors.office365.onNewCalendarEvent('OnNewCalendarEvent', {
         invocationContext.log(`Batch contains '${context.items.length}' event(s).`);
         return context.rawPayload;
     },
-});
+} satisfies Parameters<typeof connectors.office365.onNewCalendarEvent>[1] & PollConnectorTriggerOptions;
+
+connectors.office365.onNewCalendarEvent('OnNewCalendarEvent', onNewCalendarEventOptions);

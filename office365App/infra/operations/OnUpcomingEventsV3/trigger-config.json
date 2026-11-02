@@ -1,0 +1,16 @@
+{
+  "functionName": "OnUpcomingEvent",
+  "triggerConfigName": "OnUpcomingEventsV3",
+  "operationName": "OnUpcomingEventsV3",
+  "description": "Poll for upcoming Office 365 calendar events.",
+  "parameters": [
+    {
+      "name": "table",
+      "value": "Calendar"
+    },
+    {
+      "name": "lookAheadTimeInMinutes",
+      "value": 15
+    }
+  ]
+}

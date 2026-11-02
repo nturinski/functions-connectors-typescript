@@ -437,3 +437,9 @@ local.settings.json.bak
 # Azure Developer CLI
 .azure/
 
+# Repository-local test workspaces
+tests/.operation-ownership-*/
+
+# Short-lived deployment request bodies
+**/infra/scripts/.consent-parameters-*.json
+**/infra/scripts/.trigger-config-*.json

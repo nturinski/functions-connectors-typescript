@@ -3,8 +3,12 @@
 
 import { InvocationContext } from '@azure/functions';
 import { connectors, FileTriggerContext } from '@azure/functions-extensions-connectors';
+import type { PollConnectorTriggerOptions } from '../pollConnectorTriggerOptions.js';
 
-connectors.sharepoint.onNewFile('OnSharepointNewFile', {
+const onSharepointNewFileOptions = {
+    deliveryMode: 'Poll',
+    connection: 'ConnectorNamespace',
+    triggerConfigName: '%ConnectorTriggerConfigName%',
     handler: async (context: FileTriggerContext, invocationContext: InvocationContext) => {
         invocationContext.log('OnSharepointNewFile trigger received.');
 
@@ -17,4 +21,6 @@ connectors.sharepoint.onNewFile('OnSharepointNewFile', {
 
         return context.rawPayload;
     },
-});
+} satisfies Parameters<typeof connectors.sharepoint.onNewFile>[1] & PollConnectorTriggerOptions;
+
+connectors.sharepoint.onNewFile('OnSharepointNewFile', onSharepointNewFileOptions);

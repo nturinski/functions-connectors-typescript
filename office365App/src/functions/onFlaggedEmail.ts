@@ -3,8 +3,12 @@
 
 import { InvocationContext } from '@azure/functions';
 import { connectors, EmailTriggerContext } from '@azure/functions-extensions-connectors';
+import type { PollConnectorTriggerOptions } from '../pollConnectorTriggerOptions.js';
 
-connectors.office365.onFlaggedEmail('OnFlaggedEmail', {
+const onFlaggedEmailOptions = {
+    deliveryMode: 'Poll',
+    connection: 'ConnectorNamespace',
+    triggerConfigName: '%ConnectorTriggerConfigName%',
     handler: async (context: EmailTriggerContext, invocationContext: InvocationContext) => {
         invocationContext.log('OnFlaggedEmail trigger received.');
 
@@ -16,4 +20,6 @@ connectors.office365.onFlaggedEmail('OnFlaggedEmail', {
 
         return context.rawPayload;
     },
-});
+} satisfies Parameters<typeof connectors.office365.onFlaggedEmail>[1] & PollConnectorTriggerOptions;
+
+connectors.office365.onFlaggedEmail('OnFlaggedEmail', onFlaggedEmailOptions);

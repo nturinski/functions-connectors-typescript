@@ -1,0 +1,12 @@
+{
+  "functionName": "OnFlaggedEmail",
+  "triggerConfigName": "OnFlaggedEmailV4",
+  "operationName": "OnFlaggedEmailV4",
+  "description": "Poll for flagged Office 365 emails.",
+  "parameters": [
+    {
+      "name": "folderPath",
+      "value": "Inbox"
+    }
+  ]
+}

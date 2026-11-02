@@ -1,0 +1,12 @@
+{
+  "functionName": "OnNewCalendarEvent",
+  "triggerConfigName": "CalendarGetOnNewItemsV3",
+  "operationName": "CalendarGetOnNewItemsV3",
+  "description": "Poll for new Office 365 calendar events.",
+  "parameters": [
+    {
+      "name": "table",
+      "value": "Calendar"
+    }
+  ]
+}
